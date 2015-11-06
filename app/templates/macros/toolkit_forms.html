@@ -112,12 +112,15 @@
   {%
     with
     name=question_content.id,
-    priceMin=service_data.priceMin,
-    priceMax=service_data.priceMax,
-    priceUnit=service_data.priceUnit,
-    priceInterval=service_data.priceInterval,
     value=service_data[question_content.id],
     hint=(question_content.hint or '')|markdown,
+    fields=question_content.fields,
+    price=service_data.get(question_content.fields.price),
+    minimum_price=service_data.get(question_content.minimum_price),
+    maximum_price=service_data.get(question_content.maximum_price),
+    price_unit=service_data.get(question_content.price_unit),
+    price_interval=service_data.get(question_content.price_interval),
+    hours_for_price=service_data.get(question_content.hours_for_price),
     id=question_content.id,
     error=errors.get(question_content.id)['message'],
     question_number=question_number
