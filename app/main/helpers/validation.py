@@ -166,8 +166,54 @@ class G7Validator(DeclarationValidator):
         return req_fields
 
 
-class G8Validator(G7Validator):
-    pass
+class G8Validator(DeclarationValidator):
+        optional_fields = set([
+        "mitigatingFactors", "mitigatingFactors2", "tradingStatusOther",
+        # Registered in UK = no
+        "appropriateTradeRegisters", "appropriateTradeRegistersNumber",
+        "licenceOrMemberRequired", "licenceOrMemberRequiredDetails",
+    ])
+    email_validation_fields = set(["contactEmailContractNotice", "primaryContactEmail"])
+    character_limit = 5000
+
+    def get_required_fields(self):
+        req_fields = super(G8Validator, self).get_required_fields()
+
+        dependent_fields = {
+            # If you responded yes to any of questions 22 to 34 - question numbers not accurate
+            "mitigatingFactors": [
+                'misleadingInformation', 'confidentialInformation', 'influencedContractingAuthority',
+                'witheldSupportingDocuments', 'seriousMisrepresentation', 'significantOrPersistentDeficiencies',
+                'distortedCompetition', 'conflictOfInterest', 'distortedCompetition', 'graveProfessionalMisconduct',
+                'bankrupt', 'environmentalSocialLabourLaw', 'taxEvasion'
+            ],
+            # If you responded yes to either 36 or 37 - question numbers not accurate
+            "mitigatingFactors2": [
+                "unspentTaxConvictions", "GAAR"
+            ],
+        }
+        for target_field, fields in dependent_fields.items():
+            if any(self.answers.get(field) for field in fields):
+                req_fields.add(target_field)
+
+        # Describe your trading status
+        if self.answers.get('tradingStatus') == "other (please specify)":
+            req_fields.add('tradingStatusOther')
+
+        # If your company was not established in the UK
+        if self.answers.get('establishedInTheUK') is False:
+            req_fields.add('appropriateTradeRegisters')
+            # If yes to appropriate trade registers
+            if self.answers.get('appropriateTradeRegisters') is True:
+                req_fields.add('appropriateTradeRegistersNumber')
+
+            req_fields.add('licenceOrMemberRequired')
+            # If not 'none of the above' to licenceOrMemberRequired
+            if self.answers.get('licenceOrMemberRequired') in ['licensed', 'a member of a relevant organisation']:
+                req_fields.add('licenceOrMemberRequiredDetails')
+
+        return req_fields
+
 
 
 class DOSValidator(DeclarationValidator):
