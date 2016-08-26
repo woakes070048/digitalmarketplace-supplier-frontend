@@ -6,6 +6,7 @@ from flask import render_template, request, abort, flash, redirect, url_for, cur
 from flask_login import current_user
 import flask_featureflags as feature
 import six
+from datetime import datetime
 
 from dmapiclient import APIError
 from dmapiclient.audit import AuditTypes
@@ -610,16 +611,15 @@ def signer_details(framework_slug):
         if form.validate_on_submit():
             agreement_details = {question_key: form[question_key].data for question_key in question_keys}
 
-            data_api_client.update_supplier_framework_agreement_details(
-                current_user.supplier_id, framework_slug, agreement_details, current_user.email_address
-            )
+            framework_agreement = data_api_client.create_new_framework_agreement(current_user.supplier_id, framework_slug, agreement_details, current_user.email_address)['frameworkAgreement']
+
 
             # If they have already uploaded a file then let them go to straight to the contract review
             # page as they are likely editing their signer details
-            if session.get('signature_page'):
+            if not session.get('signature_page'):
                 return redirect(url_for(".contract_review", framework_slug=framework_slug))
 
-            return redirect(url_for(".signature_upload", framework_slug=framework_slug))
+            return redirect(url_for(".signature_upload", framework_slug=framework_slug, framework_agreement_id=framework_agreement['id']))
         else:
             error_keys_in_order = [key for key in question_keys if key in form.errors.keys()]
             form_errors = [
@@ -642,19 +642,23 @@ def signer_details(framework_slug):
     ), 400 if form_errors else 200
 
 
-@main.route('/frameworks/<framework_slug>/signature-upload', methods=['GET', 'POST'])
+@main.route('/frameworks/<framework_slug>/signature-upload/<framework_agreement_id>', methods=['GET', 'POST'])
 @login_required
-def signature_upload(framework_slug):
+def signature_upload(framework_slug, framework_agreement_id):
     framework = get_framework(data_api_client, framework_slug)
-    return_supplier_framework_info_if_on_framework_or_abort(data_api_client, framework_slug)
+    framework_agreement = data_api_client.get_framework_agreement(framework_agreement_id)['frameworkAgreement']
+    # return_supplier_framework_info_if_on_framework_or_abort(data_api_client, framework_slug)
     agreements_bucket = s3.S3(current_app.config['DM_AGREEMENTS_BUCKET'])
-    signature_page = get_most_recently_uploaded_agreement_file_or_none(agreements_bucket, framework_slug)
+    signature_page_url = framework_agreement.get('signaturePageUrl', None)
+    files = agreements_bucket.list(signature_page_url)
+    signature_page = files.pop() if files else None
+
     upload_error = None
 
     if request.method == 'POST':
         # No file chosen for upload and file already exists on s3 so can use existing and progress
         if not request.files['signature_page'].filename and signature_page:
-            return redirect(url_for(".contract_review", framework_slug=framework_slug))
+            return redirect(url_for(".contract_review", framework_slug=framework_slug, framework_agreement_id=framework_agreement['id']))
 
         if not file_is_image(request.files['signature_page']) and not file_is_pdf(request.files['signature_page']):
             upload_error = "The file must be a PDF, JPG or PNG"
@@ -664,11 +668,15 @@ def signature_upload(framework_slug):
             upload_error = "The file must not be empty"
 
         if not upload_error:
+            timestamp = datetime.utcnow().strftime('%Y%m%dT%H%M%S')
+            request.files['signature_page'].filename = '{}{}'.format(timestamp, get_extension(request.files['signature_page'].filename))
+
             upload_path = get_agreement_document_path(
                 framework_slug,
                 current_user.supplier_id,
-                '{}{}'.format(SIGNED_AGREEMENT_PREFIX, get_extension(request.files['signature_page'].filename))
+                request.files['signature_page'].filename
             )
+
             agreements_bucket.save(
                 upload_path,
                 request.files['signature_page'],
@@ -676,6 +684,8 @@ def signature_upload(framework_slug):
             )
 
             session['signature_page'] = request.files['signature_page'].filename
+
+            data_api_client.update_framework_agreement_with_signing_page_url(framework_agreement_id, upload_path, timestamp)
 
             data_api_client.create_audit_event(
                 audit_type=AuditTypes.upload_signed_agreement,
@@ -687,29 +697,33 @@ def signature_upload(framework_slug):
                     "upload_path": upload_path
                 })
 
-            return redirect(url_for(".contract_review", framework_slug=framework_slug))
+            return redirect(url_for(".contract_review", framework_slug=framework_slug, framework_agreement_id=framework_agreement['id']))
 
     return render_template(
         "frameworks/signature_upload.html",
         framework=framework,
+        framework_agreement=framework_agreement,
         signature_page=signature_page,
         upload_error=upload_error,
     ), 400 if upload_error else 200
 
 
-@main.route('/frameworks/<framework_slug>/contract-review', methods=['GET', 'POST'])
+@main.route('/frameworks/<framework_slug>/contract-review/<framework_agreement_id>', methods=['GET', 'POST'])
 @login_required
-def contract_review(framework_slug):
+def contract_review(framework_slug, framework_agreement_id):
     framework = get_framework(data_api_client, framework_slug)
+    framework_agreement = data_api_client.get_framework_agreement(framework_agreement_id)['frameworkAgreement']
     supplier_framework = return_supplier_framework_info_if_on_framework_or_abort(data_api_client, framework_slug)
     agreements_bucket = s3.S3(current_app.config['DM_AGREEMENTS_BUCKET'])
-    signature_page = get_most_recently_uploaded_agreement_file_or_none(agreements_bucket, framework_slug)
+    signature_page_url = framework_agreement.get('signaturePageUrl', None)
+    files = agreements_bucket.list(signature_page_url)
+    signature_page = files.pop() if files else None
 
-    # if supplier_framework doesn't have a name or a role or the agreement file, then 404
+    # if framework_agreement doesn't have a name or a role or the agreement file, then 404
     if not (
-        supplier_framework['agreementDetails'] and
-        supplier_framework['agreementDetails'].get('signerName') and
-        supplier_framework['agreementDetails'].get('signerRole') and
+        framework_agreement['agreementDetails'] and
+        framework_agreement['agreementDetails'].get('signerName') and
+        framework_agreement['agreementDetails'].get('signerRole') and
         signature_page
     ):
         abort(404)
@@ -785,6 +799,7 @@ def contract_review(framework_slug):
         form=form,
         form_errors=form_errors,
         framework=framework,
+        framework_agreement=framework_agreement,
         signature_page=signature_page,
         supplier_framework=supplier_framework,
     ), 400 if form_errors else 200
